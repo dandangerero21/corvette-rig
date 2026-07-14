@@ -19,10 +19,13 @@ public class CarController : MonoBehaviour
     public float maxSpeed = 250f;    // 1000 km/h is Mach 0.8. Let's be reasonable.
 
     [Header("Steering")]
-    public float antiRoll = 5000f;
+    public float antiRoll = 7000f;        // Base anti-roll (low speed)
+    public float maxAntiRoll = 20000f;    // Anti-roll at full speed (stiff chassis)
     public float maxSteeringAngle = 35f;
-    public float highSpeedSteerAngle = 10f; // Angle at max speed
-    public float steeringSpeed = 5f;
+    public float highSpeedSteerAngle = 5f;  // Angle at high speed
+    public float steerLimitSpeed = 120f;    // Speed (km/h) at which limiting is fully applied
+    public float maxSteeringSpeed = 6f;     // How fast steering moves at low speed
+    public float minSteeringSpeed = 1.5f;   // How fast steering moves at high speed (sluggish)
 
     private float currentSteerAngle;
 
@@ -51,14 +54,23 @@ public class CarController : MonoBehaviour
         float speedKmH = rb.linearVelocity.magnitude * 3.6f;
 
         //
-        // SPEED-SENSITIVE STEERING (Done Once, Properly)
+        // SPEED-SENSITIVE STEERING
+        // - Max angle shrinks as speed rises (less angle at high speed)
+        // - Steering rate also slows at high speed (physically steers sluggishly)
+        // Both prevent snap-roll when turning at high speeds.
         //
         float rawSteerInput = Input.GetAxis("Horizontal");
-        float speedFactor = Mathf.Clamp01(speedKmH / maxSpeed);
 
-        float targetMaxAngle = Mathf.Lerp(maxSteeringAngle, highSpeedSteerAngle, speedFactor);
+        // Curve kicks in fully at steerLimitSpeed, not maxSpeed
+        float speedFactor = Mathf.Clamp01(speedKmH / steerLimitSpeed);
+        float smoothFactor = speedFactor * speedFactor; // Quadratic: gentle at low speed, aggressive at high
+
+        // Reduce max angle
+        float targetMaxAngle = Mathf.Lerp(maxSteeringAngle, highSpeedSteerAngle, smoothFactor);
         float targetAngle = rawSteerInput * targetMaxAngle;
 
+        // Reduce steering RATE too — so turning feels heavy and slow at speed
+        float steeringSpeed = Mathf.Lerp(maxSteeringSpeed, minSteeringSpeed, smoothFactor);
         currentSteerAngle = Mathf.Lerp(currentSteerAngle, targetAngle, steeringSpeed * Time.fixedDeltaTime);
 
         frontLeft.steerAngle = currentSteerAngle;
@@ -106,10 +118,11 @@ public class CarController : MonoBehaviour
         rb.AddForce(transform.up * lift);
 
         //
-        // ANTI-ROLL
+        // ANTI-ROLL (speed-scaled: stiffer chassis at high speed to kill wobble)
         //
-        ApplyAntiRoll(frontLeft, frontRight);
-        ApplyAntiRoll(rearLeft, rearRight);
+        float antiRollAtSpeed = Mathf.Lerp(antiRoll, maxAntiRoll, Mathf.Clamp01(speedKmH / steerLimitSpeed));
+        ApplyAntiRoll(frontLeft, frontRight, antiRollAtSpeed);
+        ApplyAntiRoll(rearLeft, rearRight, antiRollAtSpeed);
 
         //
         // UPDATE WHEEL MESHES
@@ -120,7 +133,7 @@ public class CarController : MonoBehaviour
         UpdateWheel(rearRight, wheelRR);
     }
 
-    void ApplyAntiRoll(WheelCollider left, WheelCollider right)
+    void ApplyAntiRoll(WheelCollider left, WheelCollider right, float rollForce)
     {
         WheelHit hit;
         float travelL = 1.0f;
@@ -138,7 +151,7 @@ public class CarController : MonoBehaviour
             travelR = (-right.transform.InverseTransformPoint(hit.point).y - right.radius) / right.suspensionDistance;
         }
 
-        float antiRollForce = (travelL - travelR) * antiRoll;
+        float antiRollForce = (travelL - travelR) * rollForce;
 
         if (groundedL)
             rb.AddForceAtPosition(left.transform.up * -antiRollForce, left.transform.position);
