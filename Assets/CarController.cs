@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 public class CarController : MonoBehaviour
 {
@@ -50,7 +51,32 @@ public class CarController : MonoBehaviour
 
     void FixedUpdate()
     {
-        float move = Input.GetAxis("Vertical");
+        float move = 0f;
+        float rawSteerInput = 0f;
+        bool handbrake = false;
+
+        // Hybrid Input System: Checks for Gamepad first, falls back to Keyboard
+        if (Gamepad.current != null)
+        {
+            // Left Stick X for steering
+            rawSteerInput = Gamepad.current.leftStick.x.ReadValue();
+
+            // Right Trigger (R2) for Gas, Left Trigger (L2) for Brake/Reverse
+            float throttle = Gamepad.current.rightTrigger.ReadValue();
+            float brake = Gamepad.current.leftTrigger.ReadValue();
+            move = throttle - brake;
+
+            // Cross (South) or Circle (East) button for Handbrake
+            handbrake = Gamepad.current.buttonSouth.isPressed || Gamepad.current.buttonEast.isPressed;
+        }
+        else
+        {
+            // Keyboard Fallback
+            move = Input.GetAxis("Vertical");
+            rawSteerInput = Input.GetAxis("Horizontal");
+            handbrake = Input.GetKey(KeyCode.Space);
+        }
+
         float speedKmH = rb.linearVelocity.magnitude * 3.6f;
 
         //
@@ -59,8 +85,6 @@ public class CarController : MonoBehaviour
         // - Steering rate also slows at high speed (physically steers sluggishly)
         // Both prevent snap-roll when turning at high speeds.
         //
-        float rawSteerInput = Input.GetAxis("Horizontal");
-
         // Curve kicks in fully at steerLimitSpeed, not maxSpeed
         float speedFactor = Mathf.Clamp01(speedKmH / steerLimitSpeed);
         float smoothFactor = speedFactor * speedFactor; // Quadratic: gentle at low speed, aggressive at high
@@ -98,7 +122,7 @@ public class CarController : MonoBehaviour
         //
         // BRAKES
         //
-        if (Input.GetKey(KeyCode.Space))
+        if (handbrake)
         {
             rearLeft.brakeTorque = brakeForce;
             rearRight.brakeTorque = brakeForce;

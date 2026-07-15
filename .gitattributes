@@ -83,6 +83,8 @@ Packages/packages-lock.json linguist-generated
 *.collada               lfs
 *.dae                   lfs
 *.dxf                   lfs
+*.glb                   lfs
+*.gltf                  lfs
 *.FBX                   lfs
 *.fbx                   lfs
 *.jas                   lfs
