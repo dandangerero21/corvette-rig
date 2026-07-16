@@ -37,6 +37,12 @@ public class CarController : MonoBehaviour
     public float downforceCoefficient = 5f;
     public Vector3 centerOfMass = new Vector3(0, -0.5f, 0); // -1 often clips into the floor
 
+    [Header("AI Control")]
+    public bool isAI = false;
+    [HideInInspector] public float aiMoveInput = 0f;
+    [HideInInspector] public float aiSteerInput = 0f;
+    [HideInInspector] public bool aiHandbrakeInput = false;
+
     private Rigidbody rb;
 
     void Start()
@@ -56,7 +62,13 @@ public class CarController : MonoBehaviour
         bool handbrake = false;
 
         // Hybrid Input System: Checks for Gamepad first, falls back to Keyboard
-        if (Gamepad.current != null)
+        if (isAI)
+        {
+            move = aiMoveInput;
+            rawSteerInput = aiSteerInput;
+            handbrake = aiHandbrakeInput;
+        }
+        else if (Gamepad.current != null)
         {
             // Left Stick X for steering
             rawSteerInput = Gamepad.current.leftStick.x.ReadValue();
