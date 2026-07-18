@@ -4,6 +4,9 @@ using TMPro;
 
 public class Speedometer : MonoBehaviour
 {
+    // Event fired when a lap is completed
+    public static System.Action OnLapCompleted;
+
     [Header("Car & Race Settings")]
     public Rigidbody carRigidbody;
     public int currentPosition = 22;
@@ -11,6 +14,14 @@ public class Speedometer : MonoBehaviour
     public int totalLaps = 3;
     public float currentLapTime = 0.0f;
     public bool showMPH = true;
+
+    [Header("Automatic Lap Counting")]
+    public Transform lapPathRoot; // Optional path root transform (falls back to minimapTrack.pathRoot)
+    public bool showDebugHUD = true; // Toggle on-screen debug display of the lap counting variables
+    private Transform[] lapWaypoints;
+    private int lastClosestWaypointIdx = -1;
+    private bool halfTrackPassed = false;
+    private float nextWaypointsScanTime = 0f;
 
     [Header("UI Speedometer (Right Side)")]
     public TextMeshProUGUI speedText;         // e.g. "89"
@@ -32,6 +43,7 @@ public class Speedometer : MonoBehaviour
     public RectTransform minimapContainer;    // The UI Image of the white map outline
     public RectTransform minimapPlayerDot;     // The small dot representing the player
     public Collider trackCollider;            // Drag your track collider here to auto-calculate boundaries!
+    public UIMinimapTrack minimapTrack;        // Dynamic path-based minimap component
     
     [HideInInspector]
     public Vector2 worldMapMin;
@@ -40,6 +52,7 @@ public class Speedometer : MonoBehaviour
 
     private void Start()
     {
+        InitializeLapWaypoints();
 
         // Automatically calculate track boundaries from the collider bounds
         if (trackCollider != null)
@@ -94,6 +107,8 @@ public class Speedometer : MonoBehaviour
             currentLapTime += Time.deltaTime;
         }
 
+        UpdateLapTracking();
+
         if (lapText != null)
             lapText.text = "lap " + currentLap + "/" + totalLaps;
 
@@ -118,23 +133,31 @@ public class Speedometer : MonoBehaviour
 
     private void UpdateMinimapHUD()
     {
-        if (minimapContainer == null || minimapPlayerDot == null || carRigidbody == null)
+        if (minimapPlayerDot == null || carRigidbody == null)
             return;
 
-        Vector3 carPos = carRigidbody.transform.position;
+        if (minimapTrack != null)
+        {
+            // Use the vector track map to compute precise local coordinates
+            minimapPlayerDot.anchoredPosition = minimapTrack.WorldToMinimapPosition(carRigidbody.transform.position);
+        }
+        else if (minimapContainer != null)
+        {
+            Vector3 carPos = carRigidbody.transform.position;
 
-        // Normalize car position within the defined world boundaries (0 to 1)
-        float normX = Mathf.InverseLerp(worldMapMin.x, worldMapMax.x, carPos.x);
-        float normY = Mathf.InverseLerp(worldMapMin.y, worldMapMax.y, carPos.z); // Z is depth/Y in 2D map
+            // Normalize car position within the defined world boundaries (0 to 1)
+            float normX = Mathf.InverseLerp(worldMapMin.x, worldMapMax.x, carPos.x);
+            float normY = Mathf.InverseLerp(worldMapMin.y, worldMapMax.y, carPos.z); // Z is depth/Y in 2D map
 
-        // Convert normalized position to UI container size
-        float mapWidth = minimapContainer.rect.width;
-        float mapHeight = minimapContainer.rect.height;
+            // Convert normalized position to UI container size
+            float mapWidth = minimapContainer.rect.width;
+            float mapHeight = minimapContainer.rect.height;
 
-        float uiX = (normX - 0.5f) * mapWidth;
-        float uiY = (normY - 0.5f) * mapHeight;
+            float uiX = (normX - 0.5f) * mapWidth;
+            float uiY = (normY - 0.5f) * mapHeight;
 
-        minimapPlayerDot.anchoredPosition = new Vector2(uiX, uiY);
+            minimapPlayerDot.anchoredPosition = new Vector2(uiX, uiY);
+        }
     }
 
     private string GetOrdinalSuffix(int number)
@@ -158,8 +181,141 @@ public class Speedometer : MonoBehaviour
 
     private string FormatTime(float timeInSeconds)
     {
-        int seconds = Mathf.FloorToInt(timeInSeconds);
-        int milliseconds = Mathf.FloorToInt((timeInSeconds - seconds) * 1000f);
-        return $"{seconds}.{milliseconds:D3}";
+        int minutes = Mathf.FloorToInt(timeInSeconds / 60f);
+        int seconds = Mathf.FloorToInt(timeInSeconds % 60f);
+        int milliseconds = Mathf.FloorToInt((timeInSeconds - Mathf.Floor(timeInSeconds)) * 1000f);
+        return $"{minutes}:{seconds:D2}.{milliseconds:D3}";
+    }
+
+    private void InitializeLapWaypoints()
+    {
+        Transform path = lapPathRoot;
+        
+        // Fallback 1: Use minimapTrack's path root
+        if (path == null && minimapTrack != null)
+        {
+            path = minimapTrack.pathRoot;
+        }
+        
+        // Fallback 2: Scan the scene for AICarController (which always has the track path assigned)
+        if (path == null)
+        {
+            AICarController[] aiControllers = FindObjectsByType<AICarController>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            foreach (var ai in aiControllers)
+            {
+                if (ai.pathRoot != null)
+                {
+                    path = ai.pathRoot;
+                    break;
+                }
+            }
+        }
+        
+        // Fallback 3: Search the scene for standard path naming conventions
+        if (path == null)
+        {
+            GameObject pathGO = GameObject.Find("Path") ?? GameObject.Find("Waypoints") ?? GameObject.Find("TrackPath") ?? GameObject.Find("Track");
+            if (pathGO != null)
+            {
+                path = pathGO.transform;
+            }
+        }
+
+        // Auto-recovery: If the path assigned has 0 children but has a parent,
+        // it means the user likely assigned a single waypoint (child) instead of the path root (parent)!
+        // We automatically step up to the parent to get the full waypoint list.
+        if (path != null && path.childCount == 0 && path.parent != null)
+        {
+            path = path.parent;
+        }
+
+        if (path != null && path.childCount > 0)
+        {
+            lapWaypoints = new Transform[path.childCount];
+            for (int i = 0; i < path.childCount; i++)
+            {
+                lapWaypoints[i] = path.GetChild(i);
+            }
+            lastClosestWaypointIdx = GetClosestWaypointIndex();
+            halfTrackPassed = false;
+            Debug.Log($"[Lap Tracker] Auto-initialized with {lapWaypoints.Length} waypoints from '{path.gameObject.name}'.");
+        }
+    }
+
+    private void UpdateLapTracking()
+    {
+        if (lapWaypoints == null || lapWaypoints.Length == 0)
+        {
+            if (Time.time < nextWaypointsScanTime) return;
+            nextWaypointsScanTime = Time.time + 2.0f; // Only scan once every 2 seconds
+            
+            // Try to initialize on-the-fly if path wasn't ready at Start
+            InitializeLapWaypoints();
+            if (lapWaypoints == null || lapWaypoints.Length == 0) return;
+        }
+
+        int closestIdx = GetClosestWaypointIndex();
+        if (closestIdx == -1 || closestIdx == lastClosestWaypointIdx) return;
+
+        int waypointCount = lapWaypoints.Length;
+
+        // Check if we passed the halfway mark area of the track (middle 50% of track)
+        // Using a range prevents skips due to high speeds.
+        if (closestIdx > waypointCount * 0.25f && closestIdx < waypointCount * 0.75f)
+        {
+            halfTrackPassed = true;
+        }
+
+        // Lap crossing check: transition from the last part of waypoints back to the start.
+        // Calculates the index change. If we jump from a high index (near end of track) to a low index (near start)
+        // it registers as a finish line crossing. This is mathematically N-independent.
+        int indexChange = closestIdx - lastClosestWaypointIdx;
+        if (indexChange < -waypointCount / 2)
+        {
+            if (halfTrackPassed)
+            {
+                currentLap++;
+                currentLapTime = 0f; // Reset lap time on new lap!
+                halfTrackPassed = false;
+                OnLapCompleted?.Invoke();
+                Debug.Log($"[Lap Tracker] Lap completed! Current Lap: {currentLap}");
+            }
+        }
+
+        lastClosestWaypointIdx = closestIdx;
+    }
+
+    private int GetClosestWaypointIndex()
+    {
+        if (lapWaypoints == null || lapWaypoints.Length == 0 || carRigidbody == null) return -1;
+
+        Vector3 carPos = carRigidbody.transform.position;
+        float minDst = float.MaxValue;
+        int closestIdx = -1;
+
+        for (int i = 0; i < lapWaypoints.Length; i++)
+        {
+            float dst = Vector3.Distance(carPos, lapWaypoints[i].position);
+            if (dst < minDst)
+            {
+                minDst = dst;
+                closestIdx = i;
+            }
+        }
+        return closestIdx;
+    }
+
+    private void OnGUI()
+    {
+        if (!showDebugHUD) return;
+
+        GUI.Box(new Rect(10, 10, 320, 170), "Lap Tracker Diagnostic HUD");
+        GUI.Label(new Rect(20, 30, 300, 20), $"Waypoints Count: {(lapWaypoints != null ? lapWaypoints.Length.ToString() : "0 (No path assigned!)")}");
+        GUI.Label(new Rect(20, 50, 300, 20), $"Current Closest Waypoint: {GetClosestWaypointIndex()}");
+        GUI.Label(new Rect(20, 70, 300, 20), $"Last Closest Waypoint: {lastClosestWaypointIdx}");
+        GUI.Label(new Rect(20, 90, 300, 20), $"Half Track Passed: {halfTrackPassed}");
+        GUI.Label(new Rect(20, 110, 300, 20), $"Current Lap: {currentLap}");
+        GUI.Label(new Rect(20, 130, 300, 20), $"Car Rigidbody: {(carRigidbody != null ? carRigidbody.gameObject.name : "Null!")}");
+        GUI.Label(new Rect(20, 150, 300, 20), $"Car Position: {(carRigidbody != null ? carRigidbody.transform.position.ToString("F1") : "N/A")}");
     }
 }
