@@ -138,10 +138,31 @@ public class CarController : MonoBehaviour
             rearLeft.motorTorque = effectiveTorque;
             rearRight.motorTorque = effectiveTorque;
         }
-        else if (move < 0) // Reverse
+        else if (move < 0) // Braking or Reverse
         {
-            rearLeft.motorTorque = move * motorForce;
-            rearRight.motorTorque = move * motorForce;
+            // ponytail: negative input = BRAKES when moving forward, reverse only when nearly stopped
+            if (speedKmH > 5f)
+            {
+                float brakeAmount = Mathf.Abs(move);
+                frontLeft.brakeTorque  = brakeAmount * brakeForce;
+                frontRight.brakeTorque = brakeAmount * brakeForce;
+                rearLeft.brakeTorque   = brakeAmount * brakeForce * 0.7f;
+                rearRight.brakeTorque  = brakeAmount * brakeForce * 0.7f;
+                rearLeft.motorTorque  = 0;
+                rearRight.motorTorque = 0;
+            }
+            else
+            {
+                // Actually reversing — boosted by 1.5x because weight shifts to the front wheels, causing rear wheels to lose traction
+                rearLeft.motorTorque  = move * motorForce * 1.5f;
+                rearRight.motorTorque = move * motorForce * 1.5f;
+                
+                // ponytail: MUST clear brakes here, otherwise they stay stuck from auto-hold!
+                rearLeft.brakeTorque = 0;
+                rearRight.brakeTorque = 0;
+                frontLeft.brakeTorque = 0;
+                frontRight.brakeTorque = 0;
+            }
         }
         else
         {
@@ -156,21 +177,20 @@ public class CarController : MonoBehaviour
         {
             rearLeft.brakeTorque = brakeForce;
             rearRight.brakeTorque = brakeForce;
-            frontLeft.brakeTorque = brakeForce * 0.5f; // Apply some front brakes too for handbrake stability
+            frontLeft.brakeTorque = brakeForce * 0.5f;
             frontRight.brakeTorque = brakeForce * 0.5f;
-            rearLeft.motorTorque = 0; // Don't gas and brake simultaneously 
+            rearLeft.motorTorque = 0;
             rearRight.motorTorque = 0;
         }
         else if (move == 0)
         {
-            // Auto-braking: Applies drag torque if rolling, and locks wheels if stationary to prevent sliding/creeping.
-            float autoBrake = speedKmH < 2f ? 600f : 50f; // 600Nm torque when stationary holds it firmly, 50Nm engine brake
+            float autoBrake = speedKmH < 2f ? 150f : 50f; 
             rearLeft.brakeTorque = autoBrake;
             rearRight.brakeTorque = autoBrake;
-            frontLeft.brakeTorque = autoBrake * 0.5f;
-            frontRight.brakeTorque = autoBrake * 0.5f;
+            frontLeft.brakeTorque = 0f; 
+            frontRight.brakeTorque = 0f;
         }
-        else
+        else if (move > 0)
         {
             rearLeft.brakeTorque = 0;
             rearRight.brakeTorque = 0;
@@ -194,9 +214,11 @@ public class CarController : MonoBehaviour
         rb.AddForceAtPosition(-transform.up * rearForce,  rearAxlePos);
 
         //
-        // ANTI-ROLL (speed-scaled: stiffer chassis at high speed to kill wobble)
-        //
+        // Prevent anti-roll from causing chassis oscillation/rocking when stationary
         float antiRollAtSpeed = Mathf.Lerp(antiRoll, maxAntiRoll, Mathf.Clamp01(speedKmH / steerLimitSpeed));
+        float lowSpeedFactor = Mathf.Clamp01(speedKmH / 5f); // 0 at stationary, 1 at 5 km/h and above
+        antiRollAtSpeed *= lowSpeedFactor;
+
         ApplyAntiRoll(frontLeft, frontRight, antiRollAtSpeed);
         ApplyAntiRoll(rearLeft, rearRight, antiRollAtSpeed);
 

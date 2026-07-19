@@ -14,7 +14,7 @@ public class CarAudio : MonoBehaviour
 
     [Header("Engine Tuning")]
     public float minPitch = 0.48f;      // Idle pitch — lower = deeper V8 lope
-    public float maxPitch = 1.68f;      // Redline pitch — SAME for every gear
+    public float maxPitch = 1.95f;      // Redline pitch — SAME for every gear
     public float baseVolume = 0.70f;    // Volume at idle
     public float maxVolume = 1.0f;      // Volume at redline
     [Tooltip("Extra linear volume multiplier applied on top. Raise this if the engine is still too quiet.")]
@@ -36,7 +36,7 @@ public class CarAudio : MonoBehaviour
     [Tooltip("The RPM (0-1) at which 1st gear begins. Keep low so 1st gear has a wide rev range.")]
     public float baseGearRpm = 0.10f;
     [Tooltip("The RPM (0-1) at which the highest gear begins. Higher = higher idle tone in top gears.")]
-    public float topGearBaseRpm = 0.68f;
+    public float topGearBaseRpm = 0.82f;
 
     [Header("Transmission")]
     [Tooltip("Number of forward gears.")]
@@ -228,6 +228,14 @@ public class CarAudio : MonoBehaviour
     {
         if (engineSource == null || !engineSource.isPlaying || gearSpeeds == null) return;
 
+        // Force AI cars to use 3D audio so they don't play globally in the player's ears
+        float targetSpatialBlend = (carController != null && carController.isAI) ? 1.0f : engineSpatialBlend;
+        if (engineSource.spatialBlend != targetSpatialBlend)
+        {
+            engineSource.spatialBlend = targetSpatialBlend;
+            if (engineSource2 != null) engineSource2.spatialBlend = targetSpatialBlend;
+        }
+
         float speedKmH = rb.linearVelocity.magnitude * 3.6f;
 
         // Detect reverse
@@ -378,11 +386,46 @@ public class CarAudio : MonoBehaviour
                 {
                     float nextGearT  = Mathf.Clamp01((float)currentGear / (numberOfGears - 1));
                     float nextBase   = Mathf.Lerp(baseGearRpm, topGearBaseRpm, nextGearT);
-                    rpmPercent = Mathf.Lerp(nextBase, effRpm, shiftFact * shiftFact);
+                    
+                    // Aggressive shift: hold redline briefly, then snap down instantly
+                    float t = 1.0f - shiftFact; // Progress from 0.0 to 1.0
+                    
+                    if (t < 0.2f) 
+                    {
+                        // Hold peak RPM for the first 20% of the shift (simulates power cut delay)
+                        rpmPercent = effRpm;
+                    }
+                    else 
+                    {
+                        // Snap instantly to the lower RPM of the next gear
+                        float fall = 1.0f - ((t - 0.2f) / 0.8f);
+                        rpmPercent = Mathf.Lerp(nextBase, effRpm, fall * fall * fall * 0.15f);
+                    }
                 }
                 else if (currentShiftState == ShiftState.ShiftingDown)
                 {
-                    float blipSpike = Mathf.Sin(shiftFact * Mathf.PI) * blipRpmTarget;
+                    // 1. Vary by speed: higher speed = higher blip target (0.6 to 0.95)
+                    float topSpeed = gearSpeeds[numberOfGears];
+                    float speedRatio = Mathf.Clamp01(speedKmH / (topSpeed > 0f ? topSpeed : 250f));
+                    float dynamicBlipTarget = Mathf.Lerp(0.60f, 0.95f, speedRatio);
+                    
+                    // 2. Punchier curve: smooth fast rise, sharp decay
+                    float t = 1.0f - shiftFact; // Progress from 0.0 (start of shift) to 1.0 (end)
+                    float curve = 0f;
+                    
+                    if (t < 0.2f) 
+                    {
+                        // Subtle but fast rise over the first 20% of the shift
+                        curve = Mathf.Sin((t / 0.2f) * Mathf.PI * 0.5f);
+                    } 
+                    else 
+                    {
+                        // Punchy concave falloff over the remaining 80%
+                        float fade = 1.0f - ((t - 0.2f) / 0.8f);
+                        curve = fade * fade * fade; // Cubic drop off for a sharp 'bark'
+                    }
+
+                    float blipSpike = curve * dynamicBlipTarget;
                     rpmPercent = Mathf.Max(effRpm, blipSpike);
                 }
                 else
@@ -406,8 +449,21 @@ public class CarAudio : MonoBehaviour
         float targetPitch  = Mathf.Lerp(minPitch, maxPitch, targetRpm);
         float targetVolume = Mathf.Lerp(baseVolume, maxVolume, targetRpm) * volumeBoost;
         targetVolume = Mathf.Clamp(targetVolume, 0f, 1f);
-        if (throttle <= 0.05f && currentShiftState == ShiftState.Driving)
+        
+        // Ignition cut (exhaust pop simulation) during upshifts
+        if (currentShiftState == ShiftState.ShiftingUp)
+        {
+            float t = 1.0f - Mathf.Clamp01(shiftTimer / activeShiftDuration);
+            // Sharp drop in volume precisely when the RPM snaps down (the "DSG fart" effect)
+            if (t > 0.15f && t < 0.40f)
+            {
+                targetVolume *= 0.15f;
+            }
+        }
+        else if (throttle <= 0.05f && currentShiftState == ShiftState.Driving)
+        {
             targetVolume *= 0.70f;
+        }
 
         currentEnginePitch = Mathf.Lerp(currentEnginePitch, targetPitch, pitchSmoothSpeed * Time.deltaTime);
 
@@ -479,6 +535,8 @@ public class CarAudio : MonoBehaviour
 
     void PlayLapChime()
     {
+        if (carController != null && carController.isAI) return; // Only play HUD chime for the player
+
         // Plays a nice notification sound when crossing the lap line
         if (hudSource != null && lapCompleteClip != null)
         {
