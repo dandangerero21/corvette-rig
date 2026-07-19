@@ -96,6 +96,7 @@ public class CarController : MonoBehaviour
         }
 
         float speedKmH = rb.linearVelocity.magnitude * 3.6f;
+        float forwardSpeedKmH = Vector3.Dot(rb.linearVelocity, transform.forward) * 3.6f;
 
         //
         // SPEED-SENSITIVE STEERING
@@ -140,8 +141,8 @@ public class CarController : MonoBehaviour
         }
         else if (move < 0) // Braking or Reverse
         {
-            // ponytail: negative input = BRAKES when moving forward, reverse only when nearly stopped
-            if (speedKmH > 5f)
+            // ponytail: negative input = BRAKES when moving forward, reverse when stopped or moving backward
+            if (forwardSpeedKmH > 5f)
             {
                 float brakeAmount = Mathf.Abs(move);
                 frontLeft.brakeTorque  = brakeAmount * brakeForce;
