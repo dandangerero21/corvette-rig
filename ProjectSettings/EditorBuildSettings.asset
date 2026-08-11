@@ -6,8 +6,20 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/Scenes/MainMenu.unity
+    guid: 1f6b3073e9341354fbfa46d57b5727f1
+  - enabled: 1
+    path: Assets/Simple Garage/Scenes/Garage Scene.unity
+    guid: 9fc0d4010bbf28b4594072e72b8655ab
+  - enabled: 1
     path: Assets/Scenes/SampleScene.unity
     guid: 99c9720ab356a0642a771bea13969a05
+  - enabled: 1
+    path: Assets/Scenes/scene new.unity
+    guid: a3ecf6b7b52a2114a983e61f9fc46229
+  - enabled: 1
+    path: Assets/Scenes/nurburgring.unity
+    guid: f7f7f51829abbd243ab11147665de741
   m_configObjects:
     com.unity.dt.app-ui: {fileID: 11400000, guid: 1b1c20d82303e4b5781c3ef50ac1449f, type: 2}
     com.unity.input.settings.actions: {fileID: -944628639613478452, guid: 052faaac586de48259a63d0c4782560b, type: 3}
