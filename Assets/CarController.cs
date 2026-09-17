@@ -1,5 +1,7 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.InputSystem.Controls;
+using UnityEngine.InputSystem.DualShock;
 
 public class CarController : MonoBehaviour
 {
@@ -18,19 +20,19 @@ public class CarController : MonoBehaviour
     [Header("Engine")]
     public float motorForce = 1500f;
     public float maxSpeed = 250f;
-    [Tooltip("How aggressively torque falls off with speed. 1.0 = linear falloff, 2.0 = quadratic (snappy low-end, lazy top-end). Higher = more realistic.")]
+    [Tooltip("How aggressively torque falls off with speed. 1.0 = linear falloff, 2.0 = quadratic.")]
     public float torqueFalloffPower = 1.8f;
 
     [Header("Steering")]
-    public float antiRoll = 7000f;        // Base anti-roll (low speed)
-    public float maxAntiRoll = 20000f;    // Anti-roll at full speed (stiff chassis)
+    public float antiRoll = 7000f;
+    public float maxAntiRoll = 20000f;
     public float maxSteeringAngle = 35f;
-    public float highSpeedSteerAngle = 18f; // Angle at high speed (was 5° — too low for hairpins)
-    public float steerLimitSpeed = 120f;    // Speed (km/h) at which limiting is fully applied
-    public float maxSteeringSpeed = 6f;     // How fast steering moves at low speed
-    public float minSteeringSpeed = 1.5f;   // How fast steering moves at high speed (sluggish, human feel)
-    public float aiSteeringSpeed = 8f;      // AI-only steering rate — bypasses minSteeringSpeed so wheels
-                                            // reach their target before the car overshoots the corner
+    public float highSpeedSteerAngle = 18f;
+    public float steerLimitSpeed = 120f;
+    public float maxSteeringSpeed = 6f;
+    public float minSteeringSpeed = 1.5f;
+    public float aiSteeringSpeed = 8f;
+    [Range(0.01f, 0.2f)] public float stickDeadzone = 0.08f;
 
     private float currentSteerAngle;
 
@@ -39,9 +41,8 @@ public class CarController : MonoBehaviour
 
     [Header("Physics")]
     public float downforceCoefficient = 5f;
-    public Vector3 centerOfMass = new Vector3(0, -0.5f, 0); // -1 often clips into the floor
-    [Tooltip("0 = all downforce at front (nosedive), 1 = all at rear (wheelie). 0.65–0.75 prevents nosedive at speed.")]
-    [Range(0f, 1f)] public float rearDownforceBias = 0.70f; // Rear-biased to resist nosedive
+    public Vector3 centerOfMass = new Vector3(0, -0.5f, 0);
+    [Range(0f, 1f)] public float rearDownforceBias = 0.70f;
 
     [Header("AI Control")]
     public bool isAI = false;
@@ -49,72 +50,147 @@ public class CarController : MonoBehaviour
     [HideInInspector] public float aiSteerInput = 0f;
     [HideInInspector] public bool aiHandbrakeInput = false;
 
+    private float moveInputBuffer;
+    private float steerInputBuffer;
+    private bool handbrakeInputBuffer;
+
     private Rigidbody rb;
+    private InputDevice targetAndroidDevice;
 
     void Start()
     {
         rb = GetComponent<Rigidbody>();
         rb.centerOfMass = centerOfMass;
-
-        // Let Unity handle these properly without aggressive manual damping
         rb.interpolation = RigidbodyInterpolation.Interpolate;
         rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+
+        FindAndroidDualShockDevice();
+        InputSystem.onDeviceChange += OnDeviceChange;
+    }
+
+    void OnDestroy()
+    {
+        InputSystem.onDeviceChange -= OnDeviceChange;
+    }
+
+    void OnDeviceChange(InputDevice device, InputDeviceChange change)
+    {
+        if (change == InputDeviceChange.Added || change == InputDeviceChange.Reconnected)
+        {
+            FindAndroidDualShockDevice();
+        }
+    }
+
+    void FindAndroidDualShockDevice()
+    {
+        targetAndroidDevice = null;
+        foreach (var dev in InputSystem.devices)
+        {
+            // Specifically target the exact Android aggregate device from the logcat list
+            if (dev.layout.Contains("DualShock") ||
+                (dev.displayName.Contains("Wireless Controller") && !dev.layout.Contains("Mouse")))
+            {
+                targetAndroidDevice = dev;
+                break;
+            }
+        }
+    }
+
+    void Update()
+    {
+        if (isAI)
+        {
+            moveInputBuffer = aiMoveInput;
+            steerInputBuffer = aiSteerInput;
+            handbrakeInputBuffer = aiHandbrakeInput;
+            return;
+        }
+
+        bool inputAcquired = false;
+
+        // Route 1: Target the specific Android DualShock device directly (bypassing Gamepad.current null bug)
+        if (targetAndroidDevice != null)
+        {
+            float stickX = ReadAxis(targetAndroidDevice, "leftStick/x", "stick/x", "x");
+            float triggerR = ReadAxis(targetAndroidDevice, "rightTrigger", "r2", "z");
+            float triggerL = ReadAxis(targetAndroidDevice, "leftTrigger", "l2", "rz");
+
+            bool btnCross = ReadButton(targetAndroidDevice, "buttonSouth", "a");
+            bool btnCircle = ReadButton(targetAndroidDevice, "buttonEast", "b");
+
+            steerInputBuffer = Mathf.Abs(stickX) > stickDeadzone ? stickX : 0f;
+            moveInputBuffer = Mathf.Clamp01(triggerR) - Mathf.Clamp01(triggerL);
+            handbrakeInputBuffer = btnCross || btnCircle;
+
+            inputAcquired = true;
+        }
+
+        // Route 2: Standard Gamepad API fallback
+        if (!inputAcquired && Gamepad.current != null)
+        {
+            var pad = Gamepad.current;
+            float rawStickX = pad.leftStick.x.ReadValue();
+            steerInputBuffer = Mathf.Abs(rawStickX) > stickDeadzone ? rawStickX : 0f;
+
+            float throttle = Mathf.Clamp01(pad.rightTrigger.ReadValue());
+            float brake = Mathf.Clamp01(pad.leftTrigger.ReadValue());
+            moveInputBuffer = throttle - brake;
+
+            handbrakeInputBuffer = pad.buttonSouth.isPressed || pad.buttonEast.isPressed;
+            inputAcquired = true;
+        }
+
+        // Route 3: Desktop Keyboard fallback
+        if (!inputAcquired)
+        {
+            moveInputBuffer = Input.GetAxis("Vertical");
+            steerInputBuffer = Input.GetAxis("Horizontal");
+            handbrakeInputBuffer = Input.GetKey(KeyCode.Space);
+        }
+    }
+
+    float ReadAxis(InputDevice dev, params string[] controlNames)
+    {
+        for (int i = 0; i < controlNames.Length; i++)
+        {
+            var ctrl = dev.TryGetChildControl<AxisControl>(controlNames[i]);
+            if (ctrl != null)
+            {
+                return ctrl.ReadValue();
+            }
+        }
+        return 0f;
+    }
+
+    bool ReadButton(InputDevice dev, params string[] controlNames)
+    {
+        for (int i = 0; i < controlNames.Length; i++)
+        {
+            var ctrl = dev.TryGetChildControl<ButtonControl>(controlNames[i]);
+            if (ctrl != null && ctrl.isPressed)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     void FixedUpdate()
     {
-        float move = 0f;
-        float rawSteerInput = 0f;
-        bool handbrake = false;
-
-        // Hybrid Input System: Checks for Gamepad first, falls back to Keyboard
-        if (isAI)
-        {
-            move = aiMoveInput;
-            rawSteerInput = aiSteerInput;
-            handbrake = aiHandbrakeInput;
-        }
-        else if (Gamepad.current != null)
-        {
-            // Left Stick X for steering
-            rawSteerInput = Gamepad.current.leftStick.x.ReadValue();
-
-            // Right Trigger (R2) for Gas, Left Trigger (L2) for Brake/Reverse
-            float throttle = Gamepad.current.rightTrigger.ReadValue();
-            float brake = Gamepad.current.leftTrigger.ReadValue();
-            move = throttle - brake;
-
-            // Cross (South) or Circle (East) button for Handbrake
-            handbrake = Gamepad.current.buttonSouth.isPressed || Gamepad.current.buttonEast.isPressed;
-        }
-        else
-        {
-            // Keyboard Fallback
-            move = Input.GetAxis("Vertical");
-            rawSteerInput = Input.GetAxis("Horizontal");
-            handbrake = Input.GetKey(KeyCode.Space);
-        }
+        float move = moveInputBuffer;
+        float rawSteerInput = steerInputBuffer;
+        bool handbrake = handbrakeInputBuffer;
 
         float speedKmH = rb.linearVelocity.magnitude * 3.6f;
         float forwardSpeedKmH = Vector3.Dot(rb.linearVelocity, transform.forward) * 3.6f;
 
-        //
         // SPEED-SENSITIVE STEERING
-        // - Max angle shrinks as speed rises (less angle at high speed)
-        // - Steering rate also slows at high speed (physically steers sluggishly)
-        // Both prevent snap-roll when turning at high speeds.
-        //
-        // Curve kicks in fully at steerLimitSpeed, not maxSpeed
         float speedFactor = Mathf.Clamp01(speedKmH / steerLimitSpeed);
-        float smoothFactor = speedFactor * speedFactor; // Quadratic: gentle at low speed, aggressive at high
+        float smoothFactor = speedFactor * speedFactor;
 
-        // Reduce max angle
         float targetMaxAngle = Mathf.Lerp(maxSteeringAngle, highSpeedSteerAngle, smoothFactor);
         float targetAngle = rawSteerInput * targetMaxAngle;
 
-        // Reduce steering RATE too — so turning feels heavy and slow at speed
-        // AI uses a fixed faster rate so it can physically reach the target angle
-        // before overshooting the corner; the human rate-limiter is kept for players.
         float steeringSpeed = isAI
             ? aiSteeringSpeed
             : Mathf.Lerp(maxSteeringSpeed, minSteeringSpeed, smoothFactor);
@@ -123,42 +199,34 @@ public class CarController : MonoBehaviour
         frontLeft.steerAngle = currentSteerAngle;
         frontRight.steerAngle = currentSteerAngle;
 
-        //
-        // ENGINE
-        //
+        // ENGINE & REVERSE
         if (speedKmH < maxSpeed && move >= 0)
         {
-            // Torque falls off with speed: full power at 0 km/h, nearly zero at maxSpeed.
-            // This mimics real gear ratios + aero drag — punchy off the line, sluggish at top speed.
             float speedRatio = Mathf.Clamp01(speedKmH / maxSpeed);
             float torqueMultiplier = Mathf.Pow(1f - speedRatio, torqueFalloffPower);
-            // Ensure a small residual (~15%) so the car can still creep towards its absolute max
             torqueMultiplier = Mathf.Max(torqueMultiplier, 0.15f);
 
             float effectiveTorque = move * motorForce * torqueMultiplier;
             rearLeft.motorTorque = effectiveTorque;
             rearRight.motorTorque = effectiveTorque;
         }
-        else if (move < 0) // Braking or Reverse
+        else if (move < 0)
         {
-            // ponytail: negative input = BRAKES when moving forward, reverse when stopped or moving backward
             if (forwardSpeedKmH > 5f)
             {
                 float brakeAmount = Mathf.Abs(move);
-                frontLeft.brakeTorque  = brakeAmount * brakeForce;
+                frontLeft.brakeTorque = brakeAmount * brakeForce;
                 frontRight.brakeTorque = brakeAmount * brakeForce;
-                rearLeft.brakeTorque   = brakeAmount * brakeForce * 0.7f;
-                rearRight.brakeTorque  = brakeAmount * brakeForce * 0.7f;
-                rearLeft.motorTorque  = 0;
+                rearLeft.brakeTorque = brakeAmount * brakeForce * 0.7f;
+                rearRight.brakeTorque = brakeAmount * brakeForce * 0.7f;
+                rearLeft.motorTorque = 0;
                 rearRight.motorTorque = 0;
             }
             else
             {
-                // Actually reversing — boosted by 1.5x because weight shifts to the front wheels, causing rear wheels to lose traction
-                rearLeft.motorTorque  = move * motorForce * 1.5f;
+                rearLeft.motorTorque = move * motorForce * 1.5f;
                 rearRight.motorTorque = move * motorForce * 1.5f;
-                
-                // ponytail: MUST clear brakes here, otherwise they stay stuck from auto-hold!
+
                 rearLeft.brakeTorque = 0;
                 rearRight.brakeTorque = 0;
                 frontLeft.brakeTorque = 0;
@@ -171,9 +239,7 @@ public class CarController : MonoBehaviour
             rearRight.motorTorque = 0;
         }
 
-        //
         // BRAKES & AUTO-HOLD
-        //
         if (handbrake)
         {
             rearLeft.brakeTorque = brakeForce;
@@ -185,10 +251,10 @@ public class CarController : MonoBehaviour
         }
         else if (move == 0)
         {
-            float autoBrake = speedKmH < 2f ? 150f : 50f; 
+            float autoBrake = speedKmH < 2f ? 150f : 50f;
             rearLeft.brakeTorque = autoBrake;
             rearRight.brakeTorque = autoBrake;
-            frontLeft.brakeTorque = 0f; 
+            frontLeft.brakeTorque = 0f;
             frontRight.brakeTorque = 0f;
         }
         else if (move > 0)
@@ -199,33 +265,26 @@ public class CarController : MonoBehaviour
             frontRight.brakeTorque = 0;
         }
 
-        //
-        // DOWNFORCE (Quadratic, as physics intended)
-        // Split between front and rear axles to control pitch attitude.
-        // rearDownforceBias = 0.7 means 70% goes to rear → resists nosedive.
-        //
+        // DOWNFORCE
         float totalDownforce = downforceCoefficient * rb.linearVelocity.sqrMagnitude;
-        float rearForce  = totalDownforce * rearDownforceBias;
+        float rearForce = totalDownforce * rearDownforceBias;
         float frontForce = totalDownforce * (1f - rearDownforceBias);
 
         Vector3 frontAxlePos = (frontLeft.transform.position + frontRight.transform.position) * 0.5f;
-        Vector3 rearAxlePos  = (rearLeft.transform.position  + rearRight.transform.position)  * 0.5f;
+        Vector3 rearAxlePos = (rearLeft.transform.position + rearRight.transform.position) * 0.5f;
 
         rb.AddForceAtPosition(-transform.up * frontForce, frontAxlePos);
-        rb.AddForceAtPosition(-transform.up * rearForce,  rearAxlePos);
+        rb.AddForceAtPosition(-transform.up * rearForce, rearAxlePos);
 
-        //
-        // Prevent anti-roll from causing chassis oscillation/rocking when stationary
+        // ANTI-ROLL
         float antiRollAtSpeed = Mathf.Lerp(antiRoll, maxAntiRoll, Mathf.Clamp01(speedKmH / steerLimitSpeed));
-        float lowSpeedFactor = Mathf.Clamp01(speedKmH / 5f); // 0 at stationary, 1 at 5 km/h and above
+        float lowSpeedFactor = Mathf.Clamp01(speedKmH / 5f);
         antiRollAtSpeed *= lowSpeedFactor;
 
         ApplyAntiRoll(frontLeft, frontRight, antiRollAtSpeed);
         ApplyAntiRoll(rearLeft, rearRight, antiRollAtSpeed);
 
-        //
-        // UPDATE WHEEL MESHES
-        //
+        // WHEEL MESHES
         UpdateWheel(frontLeft, wheelFL);
         UpdateWheel(frontRight, wheelFR);
         UpdateWheel(rearLeft, wheelRL);
@@ -253,10 +312,14 @@ public class CarController : MonoBehaviour
         float antiRollForce = (travelL - travelR) * rollForce;
 
         if (groundedL)
+        {
             rb.AddForceAtPosition(left.transform.up * -antiRollForce, left.transform.position);
+        }
 
         if (groundedR)
+        {
             rb.AddForceAtPosition(right.transform.up * antiRollForce, right.transform.position);
+        }
     }
 
     void UpdateWheel(WheelCollider collider, Transform wheelMesh)
