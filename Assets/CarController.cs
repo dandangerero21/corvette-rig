@@ -29,10 +29,14 @@ public class CarController : MonoBehaviour
     public float maxSteeringAngle = 35f;
     public float highSpeedSteerAngle = 18f;
     public float steerLimitSpeed = 120f;
-    public float maxSteeringSpeed = 6f;
-    public float minSteeringSpeed = 1.5f;
+    public float maxSteeringSpeed = 10f;
+    public float minSteeringSpeed = 3f;
     public float aiSteeringSpeed = 8f;
     [Range(0.01f, 0.2f)] public float stickDeadzone = 0.08f;
+
+    [Header("Controller Mapping")]
+    [Tooltip("If true: L2 = Accelerate (Forward), R2 = Brake / Reverse. If false: R2 = Gas, L2 = Brake.")]
+    public bool l2AccelerateR2Brake = true;
 
     private float currentSteerAngle;
 
@@ -50,12 +54,16 @@ public class CarController : MonoBehaviour
     [HideInInspector] public float aiSteerInput = 0f;
     [HideInInspector] public bool aiHandbrakeInput = false;
 
+    public float MoveInput => moveInputBuffer;
+    public float SteerInput => steerInputBuffer;
+    public bool HandbrakeInput => handbrakeInputBuffer;
+
     private float moveInputBuffer;
     private float steerInputBuffer;
     private bool handbrakeInputBuffer;
 
     private Rigidbody rb;
-    private InputDevice targetAndroidDevice;
+    private string connectedControllerName = null;
 
     void Start()
     {
@@ -64,36 +72,185 @@ public class CarController : MonoBehaviour
         rb.interpolation = RigidbodyInterpolation.Interpolate;
         rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
 
-        FindAndroidDualShockDevice();
-        InputSystem.onDeviceChange += OnDeviceChange;
-    }
-
-    void OnDestroy()
-    {
-        InputSystem.onDeviceChange -= OnDeviceChange;
-    }
-
-    void OnDeviceChange(InputDevice device, InputDeviceChange change)
-    {
-        if (change == InputDeviceChange.Added || change == InputDeviceChange.Reconnected)
+        // Auto-instantiate TouchControlsCanvas for mobile phone if not present
+        if (!isAI && TouchControls.Instance == null)
         {
-            FindAndroidDualShockDevice();
+            GameObject touchCanvasObj = new GameObject("TouchControlsCanvas");
+            touchCanvasObj.AddComponent<TouchControls>();
         }
     }
 
-    void FindAndroidDualShockDevice()
+    private bool ReadControllerInputs(out float steer, out float throttle, out float brake, out bool handbrake)
     {
-        targetAndroidDevice = null;
-        foreach (var dev in InputSystem.devices)
+        steer = 0f;
+        throttle = 0f;
+        brake = 0f;
+        handbrake = false;
+        connectedControllerName = null;
+
+        // 1. Scan all devices in InputSystem.devices
+        for (int i = 0; i < InputSystem.devices.Count; i++)
         {
-            // Specifically target the exact Android aggregate device from the logcat list
-            if (dev.layout.Contains("DualShock") ||
-                (dev.displayName.Contains("Wireless Controller") && !dev.layout.Contains("Mouse")))
+            var dev = InputSystem.devices[i];
+            if (dev == null || !dev.added) continue;
+            if (dev is Mouse || dev is Sensor || (dev is Touchscreen && !(dev is Gamepad))) continue;
+
+            string dName = (dev.displayName + " " + dev.layout).ToLower();
+            if (dName.Contains("mouse") || dName.Contains("sensor") || (dName.Contains("touchscreen") && !dName.Contains("controller"))) continue;
+
+            bool isGamepadDev = dev is Gamepad || dev is Joystick ||
+                                dName.Contains("controller") || dName.Contains("wireless") ||
+                                dName.Contains("dualshock") || dName.Contains("gamepad") || dName.Contains("joystick");
+
+            if (isGamepadDev && string.IsNullOrEmpty(connectedControllerName))
             {
-                targetAndroidDevice = dev;
-                break;
+                connectedControllerName = dev.displayName;
+            }
+
+            float curSteer = 0f;
+            float curThrottle = 0f;
+            float curBrake = 0f;
+            bool curHb = false;
+
+            // --- A. Left Stick Steering ---
+            if (dev is Gamepad pad)
+            {
+                Vector2 ls = pad.leftStick.ReadValue();
+                if (Mathf.Abs(ls.x) > stickDeadzone) curSteer = ls.x;
+                else if (Mathf.Abs(pad.dpad.ReadValue().x) > 0.05f) curSteer = pad.dpad.ReadValue().x;
+            }
+            else if (dev is Joystick joy)
+            {
+                Vector2 s = joy.stick.ReadValue();
+                if (Mathf.Abs(s.x) > stickDeadzone) curSteer = s.x;
+            }
+
+            if (Mathf.Abs(curSteer) < 0.01f)
+            {
+                var vStick = dev.TryGetChildControl<Vector2Control>("leftStick") ?? dev.TryGetChildControl<Vector2Control>("stick");
+                if (vStick != null)
+                {
+                    Vector2 v = vStick.ReadValue();
+                    if (Mathf.Abs(v.x) > stickDeadzone) curSteer = v.x;
+                }
+            }
+
+            if (Mathf.Abs(curSteer) < 0.01f)
+            {
+                var ax = dev.TryGetChildControl<AxisControl>("leftStick/x") ??
+                         dev.TryGetChildControl<AxisControl>("stick/x") ??
+                         dev.TryGetChildControl<AxisControl>("horizontal");
+                if (ax != null && !(ax is ButtonControl))
+                {
+                    float val = ax.ReadValue();
+                    if (Mathf.Abs(val) > stickDeadzone) curSteer = val;
+                }
+            }
+
+            // --- B. L2 (Throttle / Move Forward) ---
+            if (dev is Gamepad g1)
+            {
+                curThrottle = g1.leftTrigger.ReadValue();
+                if (curThrottle < 0.05f && g1.leftTrigger.isPressed) curThrottle = 1f;
+            }
+
+            if (curThrottle < 0.05f)
+            {
+                var axL2 = dev.TryGetChildControl<AxisControl>("leftTrigger") ??
+                           dev.TryGetChildControl<AxisControl>("l2") ??
+                           dev.TryGetChildControl<AxisControl>("triggerL") ??
+                           dev.TryGetChildControl<AxisControl>("brake"); // Linux/Android hid-sony uses AXIS_BRAKE for L2
+                if (axL2 != null && !(axL2 is ButtonControl))
+                {
+                    float v = axL2.ReadValue();
+                    if (v > 0.05f) curThrottle = Mathf.Clamp01(v);
+                }
+
+                var btnL2 = dev.TryGetChildControl<ButtonControl>("leftTrigger") ??
+                            dev.TryGetChildControl<ButtonControl>("l2") ??
+                            dev.TryGetChildControl<ButtonControl>("buttonL2") ??
+                            dev.TryGetChildControl<ButtonControl>("button104") ??
+                            dev.TryGetChildControl<ButtonControl>("leftShoulder");
+                if (btnL2 != null && btnL2.isPressed) curThrottle = 1f;
+            }
+
+            // --- C. R2 (Brake / Reverse) ---
+            if (dev is Gamepad g2)
+            {
+                curBrake = g2.rightTrigger.ReadValue();
+                if (curBrake < 0.05f && g2.rightTrigger.isPressed) curBrake = 1f;
+            }
+
+            if (curBrake < 0.05f)
+            {
+                var axR2 = dev.TryGetChildControl<AxisControl>("rightTrigger") ??
+                           dev.TryGetChildControl<AxisControl>("r2") ??
+                           dev.TryGetChildControl<AxisControl>("triggerR") ??
+                           dev.TryGetChildControl<AxisControl>("gas"); // Linux/Android hid-sony uses AXIS_GAS for R2
+                if (axR2 != null && !(axR2 is ButtonControl))
+                {
+                    float v = axR2.ReadValue();
+                    if (v > 0.05f) curBrake = Mathf.Clamp01(v);
+                }
+
+                var btnR2 = dev.TryGetChildControl<ButtonControl>("rightTrigger") ??
+                            dev.TryGetChildControl<ButtonControl>("r2") ??
+                            dev.TryGetChildControl<ButtonControl>("buttonR2") ??
+                            dev.TryGetChildControl<ButtonControl>("button105") ??
+                            dev.TryGetChildControl<ButtonControl>("rightShoulder");
+                if (btnR2 != null && btnR2.isPressed) curBrake = 1f;
+            }
+
+            // --- D. Circle (Handbrake) ---
+            if (dev is Gamepad g3)
+            {
+                curHb = g3.buttonEast.isPressed;
+            }
+            if (!curHb)
+            {
+                var btnEast = dev.TryGetChildControl<ButtonControl>("buttonEast") ??
+                              dev.TryGetChildControl<ButtonControl>("circle") ??
+                              dev.TryGetChildControl<ButtonControl>("b") ??
+                              dev.TryGetChildControl<ButtonControl>("button97");
+                if (btnEast != null && btnEast.isPressed) curHb = true;
+            }
+
+            if (Mathf.Abs(curSteer) > 0.01f || curThrottle > 0.01f || curBrake > 0.01f || curHb)
+            {
+                steer = curSteer;
+                throttle = curThrottle;
+                brake = curBrake;
+                handbrake = curHb;
+                connectedControllerName = dev.displayName;
+                return true;
             }
         }
+
+        // 2. Legacy Input Fallback (if activeInputHandler is Both)
+        try
+        {
+            string[] jNames = Input.GetJoystickNames();
+            if (jNames != null && jNames.Length > 0 && !string.IsNullOrEmpty(jNames[0]))
+            {
+                if (string.IsNullOrEmpty(connectedControllerName))
+                    connectedControllerName = jNames[0];
+
+                float legH = Input.GetAxis("Horizontal");
+                if (Mathf.Abs(legH) > stickDeadzone) steer = legH;
+
+                if (Input.GetKey(KeyCode.JoystickButton6) || Input.GetKey(KeyCode.JoystickButton4)) throttle = 1f;
+                if (Input.GetKey(KeyCode.JoystickButton7) || Input.GetKey(KeyCode.JoystickButton5)) brake = 1f;
+                if (Input.GetKey(KeyCode.JoystickButton1) || Input.GetKey(KeyCode.JoystickButton2)) handbrake = true;
+
+                if (Mathf.Abs(steer) > 0.01f || throttle > 0.01f || brake > 0.01f || handbrake)
+                {
+                    return true;
+                }
+            }
+        }
+        catch { }
+
+        return !string.IsNullOrEmpty(connectedControllerName);
     }
 
     void Update()
@@ -106,73 +263,59 @@ public class CarController : MonoBehaviour
             return;
         }
 
-        bool inputAcquired = false;
+        // 1. Controller Input
+        bool isControllerConnected = ReadControllerInputs(out float padSteer, out float padThrottle, out float padBrake, out bool padHb);
 
-        // Route 1: Target the specific Android DualShock device directly (bypassing Gamepad.current null bug)
-        if (targetAndroidDevice != null)
+        // 2. Touchscreen Controls
+        float touchSteer = 0f;
+        float touchThrottle = 0f;
+        float touchBrake = 0f;
+        bool touchHb = false;
+
+        if (TouchControls.Instance != null)
         {
-            float stickX = ReadAxis(targetAndroidDevice, "leftStick/x", "stick/x", "x");
-            float triggerR = ReadAxis(targetAndroidDevice, "rightTrigger", "r2", "z");
-            float triggerL = ReadAxis(targetAndroidDevice, "leftTrigger", "l2", "rz");
+            touchSteer = TouchControls.Instance.GetSteerInput();
+            touchThrottle = TouchControls.Instance.GetThrottleInput();
+            touchBrake = TouchControls.Instance.GetBrakeInput();
+            touchHb = TouchControls.Instance.GetHandbrakeInput();
 
-            bool btnCross = ReadButton(targetAndroidDevice, "buttonSouth", "a");
-            bool btnCircle = ReadButton(targetAndroidDevice, "buttonEast", "b");
-
-            steerInputBuffer = Mathf.Abs(stickX) > stickDeadzone ? stickX : 0f;
-            moveInputBuffer = Mathf.Clamp01(triggerR) - Mathf.Clamp01(triggerL);
-            handbrakeInputBuffer = btnCross || btnCircle;
-
-            inputAcquired = true;
-        }
-
-        // Route 2: Standard Gamepad API fallback
-        if (!inputAcquired && Gamepad.current != null)
-        {
-            var pad = Gamepad.current;
-            float rawStickX = pad.leftStick.x.ReadValue();
-            steerInputBuffer = Mathf.Abs(rawStickX) > stickDeadzone ? rawStickX : 0f;
-
-            float throttle = Mathf.Clamp01(pad.rightTrigger.ReadValue());
-            float brake = Mathf.Clamp01(pad.leftTrigger.ReadValue());
-            moveInputBuffer = throttle - brake;
-
-            handbrakeInputBuffer = pad.buttonSouth.isPressed || pad.buttonEast.isPressed;
-            inputAcquired = true;
-        }
-
-        // Route 3: Desktop Keyboard fallback
-        if (!inputAcquired)
-        {
-            moveInputBuffer = Input.GetAxis("Vertical");
-            steerInputBuffer = Input.GetAxis("Horizontal");
-            handbrakeInputBuffer = Input.GetKey(KeyCode.Space);
-        }
-    }
-
-    float ReadAxis(InputDevice dev, params string[] controlNames)
-    {
-        for (int i = 0; i < controlNames.Length; i++)
-        {
-            var ctrl = dev.TryGetChildControl<AxisControl>(controlNames[i]);
-            if (ctrl != null)
+            string diag;
+            if (!string.IsNullOrEmpty(connectedControllerName))
             {
-                return ctrl.ReadValue();
+                diag = $"[CONTROLLER: {connectedControllerName}] L2: {padThrottle:F2} | R2: {padBrake:F2} | Steer: {padSteer:F2}";
             }
-        }
-        return 0f;
-    }
-
-    bool ReadButton(InputDevice dev, params string[] controlNames)
-    {
-        for (int i = 0; i < controlNames.Length; i++)
-        {
-            var ctrl = dev.TryGetChildControl<ButtonControl>(controlNames[i]);
-            if (ctrl != null && ctrl.isPressed)
+            else
             {
-                return true;
+                diag = "[TOUCH ACTIVE] No Controller Found (Check Bluetooth / Accessibility)";
             }
+
+            TouchControls.Instance.UpdateDiagnostics(diag);
         }
-        return false;
+
+        // 3. Desktop Keyboard Fallback
+        float kbSteer = 0f;
+        float kbThrottle = 0f;
+        float kbBrake = 0f;
+        bool kbHb = false;
+
+        if (Keyboard.current != null)
+        {
+            if (Keyboard.current.aKey.isPressed || Keyboard.current.leftArrowKey.isPressed) kbSteer -= 1f;
+            if (Keyboard.current.dKey.isPressed || Keyboard.current.rightArrowKey.isPressed) kbSteer += 1f;
+            if (Keyboard.current.wKey.isPressed || Keyboard.current.upArrowKey.isPressed) kbThrottle = 1f;
+            if (Keyboard.current.sKey.isPressed || Keyboard.current.downArrowKey.isPressed) kbBrake = 1f;
+            if (Keyboard.current.spaceKey.isPressed) kbHb = true;
+        }
+
+        // Combine inputs seamlessly
+        float finalSteer = Mathf.Clamp(padSteer + touchSteer + kbSteer, -1f, 1f);
+        float finalThrottle = Mathf.Max(padThrottle, touchThrottle, kbThrottle);
+        float finalBrake = Mathf.Max(padBrake, touchBrake, kbBrake);
+        bool finalHb = padHb || touchHb || kbHb;
+
+        steerInputBuffer = finalSteer;
+        moveInputBuffer = Mathf.Clamp(finalThrottle - finalBrake, -1f, 1f);
+        handbrakeInputBuffer = finalHb;
     }
 
     void FixedUpdate()

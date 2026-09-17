@@ -554,15 +554,6 @@ public class CarAudio : MonoBehaviour
             return carController.aiMoveInput;
         }
 
-        // Check gamepad first if present
-        if (Gamepad.current != null)
-        {
-            float throttle = Gamepad.current.rightTrigger.ReadValue();
-            float brake = Gamepad.current.leftTrigger.ReadValue();
-            return throttle - brake;
-        }
-        
-        // Keyboard fallback
-        return Input.GetAxis("Vertical");
+        return carController.MoveInput;
     }
 }

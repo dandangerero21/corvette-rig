@@ -3357,7 +3357,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 0c4066bdc0591504c8d4c12f337dd201, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Speedometer
-  carRigidbody: {fileID: 4225343689748277138}
+  carRigidbody: {fileID: 1655774825}
   currentPosition: 2
   currentLap: 1
   totalLaps: 3
@@ -3393,7 +3393,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 111174b89a0ee444885bfbf6bcb8c2fb, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::FloatingHUD
-  targetCar: {fileID: 4225343689748277135}
+  targetCar: {fileID: 1655774823}
   localOffset: {x: 0, y: 0.7, z: -2.2}
   posSmoothTime: 0.08
   rotSmoothTime: 0.1
@@ -3926,6 +3926,7 @@ MonoBehaviour:
   minSteeringSpeed: 2.5
   aiSteeringSpeed: 8
   stickDeadzone: 0.08
+  l2AccelerateR2Brake: 1
   brakeForce: 5000
   downforceCoefficient: 5
   centerOfMass: {x: 0, y: -0.5, z: 0}
@@ -5538,6 +5539,7 @@ MonoBehaviour:
   minSteeringSpeed: 2.5
   aiSteeringSpeed: 8
   stickDeadzone: 0.08
+  l2AccelerateR2Brake: 1
   brakeForce: 8000
   downforceCoefficient: 5
   centerOfMass: {x: 0, y: -0.5, z: 0}

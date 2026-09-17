@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.InputSystem;
 
 public class GarageShowcaseCamera : MonoBehaviour
 {
@@ -57,8 +58,35 @@ public class GarageShowcaseCamera : MonoBehaviour
     {
         if (target == null) return;
 
+        bool isDragging = false;
+        Vector2 delta = Vector2.zero;
+
+        // Check New Input System Pointer/Touch/Mouse
+        if (Touchscreen.current != null && Touchscreen.current.primaryTouch.press.isPressed)
+        {
+            isDragging = true;
+            delta = Touchscreen.current.primaryTouch.delta.ReadValue() * 0.2f;
+        }
+        else if (Mouse.current != null && Mouse.current.leftButton.isPressed)
+        {
+            isDragging = true;
+            delta = Mouse.current.delta.ReadValue() * 0.1f;
+        }
+        else
+        {
+            try
+            {
+                if (Input.GetMouseButton(0))
+                {
+                    isDragging = true;
+                    delta = new Vector2(Input.GetAxis("Mouse X"), Input.GetAxis("Mouse Y"));
+                }
+            }
+            catch { }
+        }
+
         // Auto Rotation or Sweep
-        if (autoRotate && (!allowMouseControl || !Input.GetMouseButton(0)))
+        if (autoRotate && (!allowMouseControl || !isDragging))
         {
             if (sweepHeadlightOnly)
             {
@@ -72,11 +100,11 @@ public class GarageShowcaseCamera : MonoBehaviour
             }
         }
 
-        // Mouse Drag Orbit Control
-        if (allowMouseControl && Input.GetMouseButton(0))
+        // Drag Orbit Control
+        if (allowMouseControl && isDragging)
         {
-            currentAngle += Input.GetAxis("Mouse X") * mouseSensitivity;
-            currentPitch -= Input.GetAxis("Mouse Y") * mouseSensitivity;
+            currentAngle += delta.x * mouseSensitivity;
+            currentPitch -= delta.y * mouseSensitivity;
             currentPitch = Mathf.Clamp(currentPitch, -5f, 25f);
         }
 
